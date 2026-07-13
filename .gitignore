@@ -5,3 +5,4 @@ uploads/
 .env
 *.pyc
 test_files/
+vision-credentials.json
