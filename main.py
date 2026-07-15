@@ -5,10 +5,16 @@ from pydantic import BaseModel
 from datetime import datetime
 import shutil
 import os
+from dotenv import load_dotenv
+
+load_dotenv()
 
 from database import get_db
-from models import User, Claim, Document
+from models import User, Claim, Document, ExtractedData
 from auth import verify_password, create_access_token, decode_access_token
+from ocr import extract_text_from_image
+from extraction import extract_structured_data
+from image_quality import check_image_quality, validate_file_type
 
 app = FastAPI()
 
@@ -73,10 +79,10 @@ def dashboard(current_user: User = Depends(get_current_user)):
 @app.post("/claims")
 def create_claim(
     claim_type: str = Form(...),
-    prescription: UploadFile = File(...),
-    medicine_bill: UploadFile = File(...),
-    lab_bill: UploadFile = File(...),
-    consultation_receipt: UploadFile = File(...),
+    prescription: list[UploadFile] = File(...),
+    medicine_bill: list[UploadFile] = File(...),
+    lab_bill: list[UploadFile] = File(...),
+    consultation_receipt: list[UploadFile] = File(...),
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
@@ -97,20 +103,96 @@ def create_claim(
         "consultation_receipt": consultation_receipt,
     }
 
-    for doc_type, upload in files.items():
-        filename = f"claim_{new_claim.id}_{doc_type}_{upload.filename}"
-        file_path = os.path.join(UPLOAD_DIR, filename)
+    doc_config = {
+        "prescription": ("general", "prescription"),
+        "medicine_bill": ("general", "medicine_bill"),
+        "lab_bill": ("tabular", "lab_bill"),
+        "consultation_receipt": ("general", "consultation_receipt"),
+    }
 
-        with open(file_path, "wb") as buffer:
-            shutil.copyfileobj(upload.file, buffer)
+    extraction_summary = []
 
-        new_document = Document(
-            claim_id=new_claim.id,
-            doc_type=doc_type,
-            file_path=file_path,
-            uploaded_at=datetime.utcnow(),
-        )
-        db.add(new_document)
+    for doc_type, upload_list in files.items():
+        combined_text = ""
+        combined_identity_flag = False
+        page_errors = []
+        first_document_id = None
+
+        for page_num, upload in enumerate(upload_list, start=1):
+            filename = f"claim_{new_claim.id}_{doc_type}_page{page_num}_{upload.filename}"
+            file_path = os.path.join(UPLOAD_DIR, filename)
+
+            with open(file_path, "wb") as buffer:
+                shutil.copyfileobj(upload.file, buffer)
+
+            new_document = Document(
+                claim_id=new_claim.id,
+                doc_type=doc_type,
+                file_path=file_path,
+                uploaded_at=datetime.utcnow(),
+            )
+            db.add(new_document)
+            db.commit()
+            db.refresh(new_document)
+
+            if first_document_id is None:
+                first_document_id = new_document.id
+
+            type_check = validate_file_type(file_path)
+            if not type_check["valid"]:
+                page_errors.append(f"Page {page_num}: {type_check['reason']}")
+                continue
+
+            quality_check = check_image_quality(file_path)
+            if not quality_check["acceptable"]:
+                page_errors.append(f"Page {page_num}: {quality_check['reason']}")
+                continue
+
+            ocr_mode, extraction_type = doc_config[doc_type]
+            ocr_result = extract_text_from_image(file_path, document_type=ocr_mode)
+
+            if ocr_result["success"]:
+                combined_text += f"\n\n--- Page {page_num} ---\n\n" + ocr_result["text"]
+                combined_identity_flag = combined_identity_flag or ocr_result.get("identity_flag", False)
+            else:
+                page_errors.append(f"Page {page_num}: {ocr_result['error']}")
+
+        if not combined_text.strip():
+            extraction_summary.append({
+                "doc_type": doc_type,
+                "error": "; ".join(page_errors) if page_errors else "No usable pages",
+            })
+            continue
+
+        _, extraction_type = doc_config[doc_type]
+        structured = extract_structured_data(combined_text, extraction_type)
+
+        if structured["success"]:
+            for item in structured["items"]:
+                new_item = ExtractedData(
+                    document_id=first_document_id,
+                    item_name=item.get("item_name"),
+                    item_type=item.get("item_type"),
+                    quantity=item.get("quantity"),
+                    dosage=item.get("dosage"),
+                    price=item.get("price"),
+                )
+                db.add(new_item)
+            extraction_summary.append({
+                "doc_type": doc_type,
+                "pages_processed": len(upload_list) - len(page_errors),
+                "page_errors": page_errors,
+                "items_found": len(structured["items"]),
+                "needs_review": structured["needs_review"] or combined_identity_flag,
+                "illegible_ratio": structured["illegible_ratio"],
+                "blank_field_ratio": structured["blank_field_ratio"],
+                "identity_flag": combined_identity_flag,
+            })
+        else:
+            extraction_summary.append({"doc_type": doc_type, "error": structured["error"]})
+
+    if any(d.get("needs_review") for d in extraction_summary):
+        new_claim.status = "Needs Manual Review"
 
     db.commit()
 
@@ -118,4 +200,5 @@ def create_claim(
         "claim_id": new_claim.id,
         "status": new_claim.status,
         "message": "Claim submitted successfully",
+        "extraction_summary": extraction_summary,
     }

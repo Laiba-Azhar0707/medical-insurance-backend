@@ -14,17 +14,17 @@ if not token:
 
 headers = {"Authorization": f"Bearer {token}"}
 
-# Step 2: Dashboard check (already confirmed working, quick sanity check)
+# Step 2: Dashboard check
 dashboard_response = requests.get("http://127.0.0.1:8000/dashboard", headers=headers)
 print("DASHBOARD STATUS:", dashboard_response.status_code)
 
-# Step 3: Submit a claim with files
-files = {
-    "prescription": open("test_files/prescription.txt", "rb"),
-    "medicine_bill": open("test_files/medicine_bill.txt", "rb"),
-    "lab_bill": open("test_files/lab_bill.txt", "rb"),
-    "consultation_receipt": open("test_files/consultation_receipt.txt", "rb"),
-}
+# Step 3: Submit a claim (now sends one page per document type, but supports multiple)
+files = [
+    ("prescription", open("sample_prescription.jpg", "rb")),
+    ("medicine_bill", open("sample_medicine_bill.jpg", "rb")),
+    ("lab_bill", open("sample_lab_bill.jpg", "rb")),
+    ("consultation_receipt", open("sample_consultation_receipt.jpg", "rb")),
+]
 data = {"claim_type": "reimbursement"}
 
 claim_response = requests.post(
