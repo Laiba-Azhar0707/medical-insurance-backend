@@ -10,11 +10,13 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from database import get_db
-from models import User, Claim, Document, ExtractedData
+from models import User, Claim, Document, ExtractedData, Deduction
 from auth import verify_password, create_access_token, decode_access_token
 from ocr import extract_text_from_image
 from extraction import extract_structured_data
 from image_quality import check_image_quality, validate_file_type
+from comparison import compare_prescribed_vs_billed
+from deduction import calculate_deductions
 
 app = FastAPI()
 
@@ -111,6 +113,7 @@ def create_claim(
     }
 
     extraction_summary = []
+    items_by_doc_type = {}  # keeps actual extracted items for comparison later
 
     for doc_type, upload_list in files.items():
         combined_text = ""
@@ -157,6 +160,8 @@ def create_claim(
             else:
                 page_errors.append(f"Page {page_num}: {ocr_result['error']}")
 
+        items_by_doc_type[doc_type] = []
+
         if not combined_text.strip():
             extraction_summary.append({
                 "doc_type": doc_type,
@@ -178,6 +183,10 @@ def create_claim(
                     price=item.get("price"),
                 )
                 db.add(new_item)
+            db.commit()
+
+            items_by_doc_type[doc_type] = structured["items"]
+
             extraction_summary.append({
                 "doc_type": doc_type,
                 "pages_processed": len(upload_list) - len(page_errors),
@@ -191,8 +200,33 @@ def create_claim(
         else:
             extraction_summary.append({"doc_type": doc_type, "error": structured["error"]})
 
+    # --- Comparison & Deduction ---
+    prescribed_items = items_by_doc_type.get("prescription", [])
+    billed_items = items_by_doc_type.get("medicine_bill", [])
+
+    comparison_result = compare_prescribed_vs_billed(prescribed_items, billed_items)
+    deduction_summary = None
+
+    if comparison_result["success"]:
+        deduction_result = calculate_deductions(comparison_result["results"], claim_type)
+        deduction_summary = deduction_result
+
+        for d in deduction_result["deductions"]:
+            new_deduction = Deduction(
+                claim_id=new_claim.id,
+                reason=d["reason"],
+                amount=d["amount"],
+                action_type=deduction_result["action_type"],
+                created_at=datetime.utcnow(),
+            )
+            db.add(new_deduction)
+
+        new_claim.approved_amount = -deduction_result["total_unprescribed_amount"] if deduction_result["deductions"] else 0.0
+
     if any(d.get("needs_review") for d in extraction_summary):
         new_claim.status = "Needs Manual Review"
+    else:
+        new_claim.status = "Processed"
 
     db.commit()
 
@@ -201,4 +235,5 @@ def create_claim(
         "status": new_claim.status,
         "message": "Claim submitted successfully",
         "extraction_summary": extraction_summary,
+        "deduction_summary": deduction_summary,
     }
