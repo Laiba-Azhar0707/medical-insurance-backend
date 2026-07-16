@@ -113,7 +113,7 @@ def create_claim(
     }
 
     extraction_summary = []
-    items_by_doc_type = {}  # keeps actual extracted items for comparison later
+    items_by_doc_type = {}
 
     for doc_type, upload_list in files.items():
         combined_text = ""
@@ -200,30 +200,72 @@ def create_claim(
         else:
             extraction_summary.append({"doc_type": doc_type, "error": structured["error"]})
 
-    # --- Comparison & Deduction ---
-    prescribed_items = items_by_doc_type.get("prescription", [])
-    billed_items = items_by_doc_type.get("medicine_bill", [])
+    # --- Comparison & Deduction: medicines and tests ---
+    prescribed_all = items_by_doc_type.get("prescription", [])
+    prescribed_medicines = [i for i in prescribed_all if i.get("item_type") == "medicine"]
+    prescribed_tests = [i for i in prescribed_all if i.get("item_type") == "test"]
 
-    comparison_result = compare_prescribed_vs_billed(prescribed_items, billed_items)
-    deduction_summary = None
+    billed_medicines = items_by_doc_type.get("medicine_bill", [])
+    billed_tests = items_by_doc_type.get("lab_bill", [])
 
-    if comparison_result["success"]:
-        deduction_result = calculate_deductions(comparison_result["results"], claim_type)
-        deduction_summary = deduction_result
+    all_deductions = []
+    total_unprescribed = 0.0
+    comparison_errors = []
 
-        for d in deduction_result["deductions"]:
-            new_deduction = Deduction(
-                claim_id=new_claim.id,
-                reason=d["reason"],
-                amount=d["amount"],
-                action_type=deduction_result["action_type"],
-                created_at=datetime.utcnow(),
-            )
-            db.add(new_deduction)
+    medicine_comparison = compare_prescribed_vs_billed(prescribed_medicines, billed_medicines)
+    if medicine_comparison["success"]:
+        medicine_deductions = calculate_deductions(medicine_comparison["results"], claim_type)
+        all_deductions.extend(medicine_deductions["deductions"])
+        total_unprescribed += medicine_deductions["total_unprescribed_amount"]
+    else:
+        comparison_errors.append(f"Medicine comparison failed: {medicine_comparison['error']}")
 
-        new_claim.approved_amount = -deduction_result["total_unprescribed_amount"] if deduction_result["deductions"] else 0.0
+    test_comparison = compare_prescribed_vs_billed(prescribed_tests, billed_tests)
+    if test_comparison["success"]:
+        test_deductions = calculate_deductions(test_comparison["results"], claim_type)
+        all_deductions.extend(test_deductions["deductions"])
+        total_unprescribed += test_deductions["total_unprescribed_amount"]
+    else:
+        comparison_errors.append(f"Test comparison failed: {test_comparison['error']}")
 
-    if any(d.get("needs_review") for d in extraction_summary):
+    # --- Consultation receipt validation ---
+    # A consultation fee can only be considered legitimate if there's an actual
+    # prescription behind it, proving a real doctor visit took place.
+    consultation_items = items_by_doc_type.get("consultation_receipt", [])
+    consultation_flagged = False
+
+    if consultation_items and not prescribed_all:
+        for item in consultation_items:
+            all_deductions.append({
+                "item_name": item.get("item_name", "Consultation Fee"),
+                "amount": 0.0,
+                "reason": "No prescription was provided, so this consultation cannot be verified as a legitimate doctor visit.",
+                "has_price": False,
+            })
+        consultation_flagged = True
+
+    action_type = "return_notice" if claim_type == "pre_paid" else "auto_deduct"
+
+    deduction_summary = {
+        "total_unprescribed_amount": round(total_unprescribed, 2),
+        "deductions": all_deductions,
+        "action_type": action_type,
+        "errors": comparison_errors,
+    }
+
+    for d in all_deductions:
+        new_deduction = Deduction(
+            claim_id=new_claim.id,
+            reason=d["reason"],
+            amount=d["amount"],
+            action_type=action_type,
+            created_at=datetime.utcnow(),
+        )
+        db.add(new_deduction)
+
+    new_claim.approved_amount = -total_unprescribed if any(d["has_price"] for d in all_deductions) else 0.0
+
+    if any(d.get("needs_review") for d in extraction_summary) or consultation_flagged:
         new_claim.status = "Needs Manual Review"
     else:
         new_claim.status = "Processed"
