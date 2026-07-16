@@ -20,7 +20,7 @@ print("DASHBOARD STATUS:", dashboard_response.status_code)
 
 # Step 3: Submit a claim (now sends one page per document type, but supports multiple)
 files = [
-    ("prescription", open("sample_prescription.jpg", "rb")),
+    ("prescription", open("sample_real_prescription.jpg", "rb")),
     ("medicine_bill", open("sample_medicine_bill.jpg", "rb")),
     ("lab_bill", open("sample_lab_bill.jpg", "rb")),
     ("consultation_receipt", open("sample_consultation_receipt.jpg", "rb")),

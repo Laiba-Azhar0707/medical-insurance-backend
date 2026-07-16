@@ -1,5 +1,6 @@
 import os
 import json
+import time
 from dotenv import load_dotenv
 from groq import Groq
 
@@ -7,8 +8,21 @@ load_dotenv()
 
 client = Groq(api_key=os.environ.get("GROQ_API_KEY"))
 
+MAX_RETRIES = 3
+
 
 def compare_prescribed_vs_billed(prescribed_items, billed_items):
+    """
+    Compares prescribed items (from the prescription) against billed items
+    (from the medicine bill or lab bill) using fuzzy, semantic matching.
+
+    prescribed_items / billed_items: lists of dicts like
+        {"item_name": "Paracetamol", "dosage": "500mg", "price": 6.49}
+
+    Returns a dict: {"success": bool, "results": list or None, "error": str or None}
+    Each result: {"billed_item": str, "price": float or None, "matched_prescribed_item": str or None,
+                   "is_prescribed": bool, "reasoning": str}
+    """
     if not billed_items:
         return {"success": True, "results": [], "error": None}
 
@@ -40,25 +54,44 @@ def compare_prescribed_vs_billed(prescribed_items, billed_items):
         "is_prescribed (boolean), "
         "reasoning (a short string explaining the match or mismatch). "
         "Only use information given above. Do not invent medicines that aren't in either list. "
+        "You MUST return exactly one result object for every billed item, in the same order. "
         "Respond with ONLY the JSON array, no explanation, no markdown formatting."
     )
 
-    try:
-        response = client.chat.completions.create(
-            messages=[{"role": "user", "content": prompt}],
-            model="meta-llama/llama-4-scout-17b-16e-instruct",
-        )
-        raw_output = response.choices[0].message.content.strip()
+    last_error = None
+    for attempt in range(1, MAX_RETRIES + 1):
+        try:
+            response = client.chat.completions.create(
+                messages=[{"role": "user", "content": prompt}],
+                model="meta-llama/llama-4-scout-17b-16e-instruct",
+            )
+            raw_output = response.choices[0].message.content.strip()
 
-        if raw_output.startswith("```"):
-            raw_output = raw_output.strip("`")
-            if raw_output.startswith("json"):
-                raw_output = raw_output[4:].strip()
+            if raw_output.startswith("```"):
+                raw_output = raw_output.strip("`")
+                if raw_output.startswith("json"):
+                    raw_output = raw_output[4:].strip()
 
-        results = json.loads(raw_output)
-        return {"success": True, "results": results, "error": None}
+            results = json.loads(raw_output)
 
-    except json.JSONDecodeError as e:
-        return {"success": False, "results": None, "error": f"Could not parse JSON: {str(e)}. Raw: {raw_output[:200]}"}
-    except Exception as e:
-        return {"success": False, "results": None, "error": str(e)}
+            # Sanity check: the response must actually cover every billed item.
+            # This is exactly the failure mode observed earlier today, where
+            # a call "succeeded" but silently returned incomplete/empty results.
+            if not isinstance(results, list) or len(results) != len(billed_items):
+                raise ValueError(
+                    f"Expected {len(billed_items)} results, got "
+                    f"{len(results) if isinstance(results, list) else 'non-list response'}"
+                )
+
+            return {"success": True, "results": results, "error": None}
+
+        except (json.JSONDecodeError, ValueError) as e:
+            last_error = str(e)
+            if attempt < MAX_RETRIES:
+                time.sleep(2 * attempt)
+        except Exception as e:
+            last_error = str(e)
+            if attempt < MAX_RETRIES:
+                time.sleep(2 * attempt)
+
+    return {"success": False, "results": None, "error": f"Failed after {MAX_RETRIES} attempts: {last_error}"}

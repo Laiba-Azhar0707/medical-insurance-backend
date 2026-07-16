@@ -8,6 +8,28 @@ load_dotenv()
 client = Groq(api_key=os.environ.get("GROQ_API_KEY"))
 
 
+def deduplicate_items(items):
+    """
+    Removes duplicate items from the extracted list. Two items are considered
+    duplicates if they have the same item_name and the same dosage/price,
+    which happens occasionally when the model repeats a row in dense tables.
+    """
+    seen = set()
+    deduplicated = []
+
+    for item in items:
+        key = (
+            (item.get("item_name") or "").strip().lower(),
+            (item.get("dosage") or "").strip().lower(),
+            item.get("price"),
+        )
+        if key not in seen:
+            seen.add(key)
+            deduplicated.append(item)
+
+    return deduplicated
+
+
 def calculate_reliability(ocr_text, items, document_type):
     lines = [line for line in ocr_text.split("\n") if line.strip()]
     raw_fields = []
@@ -61,7 +83,8 @@ def extract_structured_data(ocr_text, document_type):
             "Extract every lab test result as a JSON array. "
             "Each item must have: item_name (the test name, string), item_type (always 'test'), "
             "quantity (always null), dosage (put the result value and reference range here as a string, e.g. '13.8 (13.0-17.0 g/dL)'), "
-            "price (number or null if not shown)."
+            "price (number or null if not shown). "
+            "Do not list the same test more than once, even if it appears to repeat in the source text."
         ),
         "consultation_receipt": (
             "Extract the consultation fee as a JSON array with one item. "
@@ -97,6 +120,7 @@ def extract_structured_data(ocr_text, document_type):
                 raw_output = raw_output[4:].strip()
 
         items = json.loads(raw_output)
+        items = deduplicate_items(items)
 
         reliability = calculate_reliability(ocr_text, items, document_type)
 
@@ -109,7 +133,7 @@ def extract_structured_data(ocr_text, document_type):
 
     except json.JSONDecodeError as e:
         return {"success": False, "items": None,
-                "error": f"Could not parse JSON response: {str(e)}. Raw output: {raw_output[:200]}",
+                "error": f"Could not parse JSON: {str(e)}. Raw: {raw_output[:200]}",
                 "illegible_ratio": 0.0, "blank_field_ratio": 0.0, "needs_review": False}
     except Exception as e:
         return {"success": False, "items": None, "error": str(e),
