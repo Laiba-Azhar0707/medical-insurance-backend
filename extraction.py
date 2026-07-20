@@ -1,11 +1,14 @@
 import os
 import json
+import time
 from dotenv import load_dotenv
 from groq import Groq
 
 load_dotenv()
 
 client = Groq(api_key=os.environ.get("GROQ_API_KEY"))
+
+MAX_RETRIES = 3
 
 
 def deduplicate_items(items):
@@ -67,6 +70,11 @@ def calculate_reliability(ocr_text, items, document_type):
 
 
 def extract_structured_data(ocr_text, document_type):
+    """
+    Takes raw OCR text and a document type, returns a list of structured line items.
+    Includes retry logic: if the AI call fails, or returns malformed JSON, it
+    retries automatically rather than silently returning an empty/wrong result.
+    """
     schema_instructions = {
         "prescription": (
             "Extract every prescribed medicine or test as a JSON array. "
@@ -107,34 +115,43 @@ def extract_structured_data(ocr_text, document_type):
         f"TEXT:\n{ocr_text}"
     )
 
-    try:
-        response = client.chat.completions.create(
-            messages=[{"role": "user", "content": prompt}],
-            model="meta-llama/llama-4-scout-17b-16e-instruct",
-        )
-        raw_output = response.choices[0].message.content.strip()
+    last_error = None
+    for attempt in range(1, MAX_RETRIES + 1):
+        try:
+            response = client.chat.completions.create(
+                messages=[{"role": "user", "content": prompt}],
+                model="openai/gpt-oss-120b",
+            )
+            raw_output = response.choices[0].message.content.strip()
 
-        if raw_output.startswith("```"):
-            raw_output = raw_output.strip("`")
-            if raw_output.startswith("json"):
-                raw_output = raw_output[4:].strip()
+            if raw_output.startswith("```"):
+                raw_output = raw_output.strip("`")
+                if raw_output.startswith("json"):
+                    raw_output = raw_output[4:].strip()
 
-        items = json.loads(raw_output)
-        items = deduplicate_items(items)
+            items = json.loads(raw_output)
 
-        reliability = calculate_reliability(ocr_text, items, document_type)
+            if not isinstance(items, list):
+                raise ValueError(f"Expected a JSON array, got: {type(items).__name__}")
 
-        return {
-            "success": True,
-            "items": items,
-            "error": None,
-            **reliability,
-        }
+            items = deduplicate_items(items)
+            reliability = calculate_reliability(ocr_text, items, document_type)
 
-    except json.JSONDecodeError as e:
-        return {"success": False, "items": None,
-                "error": f"Could not parse JSON: {str(e)}. Raw: {raw_output[:200]}",
-                "illegible_ratio": 0.0, "blank_field_ratio": 0.0, "needs_review": False}
-    except Exception as e:
-        return {"success": False, "items": None, "error": str(e),
-                "illegible_ratio": 0.0, "blank_field_ratio": 0.0, "needs_review": False}
+            return {
+                "success": True,
+                "items": items,
+                "error": None,
+                **reliability,
+            }
+
+        except (json.JSONDecodeError, ValueError) as e:
+            last_error = f"{str(e)}. Raw: {raw_output[:200] if 'raw_output' in dir() else 'N/A'}"
+            if attempt < MAX_RETRIES:
+                time.sleep(2 * attempt)
+        except Exception as e:
+            last_error = str(e)
+            if attempt < MAX_RETRIES:
+                time.sleep(2 * attempt)
+
+    return {"success": False, "items": None, "error": f"Failed after {MAX_RETRIES} attempts: {last_error}",
+            "illegible_ratio": 0.0, "blank_field_ratio": 0.0, "needs_review": False}

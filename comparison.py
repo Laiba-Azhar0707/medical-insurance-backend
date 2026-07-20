@@ -63,7 +63,7 @@ def compare_prescribed_vs_billed(prescribed_items, billed_items):
         try:
             response = client.chat.completions.create(
                 messages=[{"role": "user", "content": prompt}],
-                model="meta-llama/llama-4-scout-17b-16e-instruct",
+                model="openai/gpt-oss-120b",
             )
             raw_output = response.choices[0].message.content.strip()
 

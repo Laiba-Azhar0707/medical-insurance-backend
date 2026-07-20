@@ -1,5 +1,5 @@
 """
-Basic automated tests codifying today's manually-verified findings.
+Basic automated tests codifying manually-verified findings.
 Run with: python test_suite.py
 """
 
@@ -28,18 +28,24 @@ if ocr_result["success"]:
     structured = extract_structured_data(ocr_result["text"], "prescription")
     check("Prescription with no medicines returns empty items list",
           structured["success"] and len(structured["items"]) == 0)
+else:
+    check(f"Prescription OCR (FAILED: {ocr_result['error']})", False)
 
 ocr_result = extract_text_from_image("sample_medicine_bill.jpg", document_type="general")
 if ocr_result["success"]:
     structured = extract_structured_data(ocr_result["text"], "medicine_bill")
     check("Medicine bill returns 6 items",
           structured["success"] and len(structured["items"]) == 6)
+else:
+    check(f"Medicine bill OCR (FAILED: {ocr_result['error']})", False)
 
 ocr_result = extract_text_from_image("sample_consultation_receipt.jpg", document_type="general")
 if ocr_result["success"]:
     structured = extract_structured_data(ocr_result["text"], "consultation_receipt")
     check("Consultation receipt returns exactly 1 item",
           structured["success"] and len(structured["items"]) == 1)
+else:
+    check(f"Consultation receipt OCR (FAILED: {ocr_result['error']})", False)
 
 check("Identity flag detects 'Universal Hospital Research Inst.'",
       flag_suspicious_identity_fields("Name: | Universal Hospital Research Inst. |"))

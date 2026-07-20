@@ -79,7 +79,7 @@ def extract_text_from_image(image_path, document_type="general"):
                         ],
                     }
                 ],
-                model="meta-llama/llama-4-scout-17b-16e-instruct",
+                model="qwen/qwen3.6-27b",
             )
             extracted_text = response.choices[0].message.content
             identity_flag = flag_suspicious_identity_fields(extracted_text)
