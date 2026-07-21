@@ -1,10 +1,10 @@
+import os
 from fastapi import FastAPI, Depends, HTTPException, Header, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 from pydantic import BaseModel
 from datetime import datetime
 import shutil
-import os
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -20,9 +20,14 @@ from deduction import calculate_deductions
 
 app = FastAPI()
 
+ALLOWED_ORIGINS = ["http://localhost:5173"]
+extra_origins = os.environ.get("FRONTEND_ORIGIN")
+if extra_origins:
+    ALLOWED_ORIGINS.extend(o.strip() for o in extra_origins.split(","))
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173"],
+    allow_origins=ALLOWED_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
