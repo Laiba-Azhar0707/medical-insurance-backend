@@ -8,9 +8,9 @@ In other words: OCR errors here aren't just annoying, they're *financial* errors
 
 ## The discovery
 
-While reviewing extraction output during testing, I noticed something concerning: on blurry or low-quality document photos, the model wasn't failing the way I expected. I expected garbled text, missing fields, obvious errors — the normal signature of OCR struggling with a bad image.
+## The discovery
 
-Instead, it was returning clean, plausible, complete-looking data. Medicine names that looked real. Dosages in normal ranges. Nothing that visually signaled "I couldn't actually read this."
+While testing the pipeline, I ran the same blurry lab report through extraction four separate times. It came back with three different fabricated institution names: "Universal Hospital Research Inst.", "Universum International School Academy", "Unnamed International Medical Centre." None of these were real. Each one was formatted correctly and delivered with total confidence — nothing about the output signaled "I couldn't actually read this."
 
 That's the dangerous failure mode. A model that fails loudly is easy to catch. A model that fails *confidently* is not — and in a pipeline where the output directly drives a financial decision, a confident hallucination is worse than no output at all, because nothing downstream has a reason to question it.
 
