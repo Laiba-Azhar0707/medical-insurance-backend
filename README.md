@@ -87,3 +87,4 @@ python test_end_to_end.py  # full pipeline, requires GROQ_API_KEY
 - Persistent file storage (S3) instead of ephemeral container storage
 - Confidence-score visualization in the frontend, so reviewers see *why* something was flagged, not just that it was
 - Batch claim processing for bulk submissions
+[Read the full case study →](CASE_STUDY.md)
