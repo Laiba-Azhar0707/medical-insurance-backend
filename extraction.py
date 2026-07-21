@@ -3,6 +3,7 @@ import json
 import time
 from dotenv import load_dotenv
 from groq import Groq
+from text_cleanup import strip_thinking_blocks
 
 load_dotenv()
 
@@ -12,14 +13,8 @@ MAX_RETRIES = 3
 
 
 def deduplicate_items(items):
-    """
-    Removes duplicate items from the extracted list. Two items are considered
-    duplicates if they have the same item_name and the same dosage/price,
-    which happens occasionally when the model repeats a row in dense tables.
-    """
     seen = set()
     deduplicated = []
-
     for item in items:
         key = (
             (item.get("item_name") or "").strip().lower(),
@@ -29,7 +24,6 @@ def deduplicate_items(items):
         if key not in seen:
             seen.add(key)
             deduplicated.append(item)
-
     return deduplicated
 
 
@@ -70,11 +64,6 @@ def calculate_reliability(ocr_text, items, document_type):
 
 
 def extract_structured_data(ocr_text, document_type):
-    """
-    Takes raw OCR text and a document type, returns a list of structured line items.
-    Includes retry logic: if the AI call fails, or returns malformed JSON, it
-    retries automatically rather than silently returning an empty/wrong result.
-    """
     schema_instructions = {
         "prescription": (
             "Extract every prescribed medicine or test as a JSON array. "
@@ -111,6 +100,7 @@ def extract_structured_data(ocr_text, document_type):
         f"{instruction}\n\n"
         "Only use information literally present in the text below. Never invent, guess, or fill in "
         "a value that isn't actually there, use null instead. "
+        "Do not include any reasoning, thinking, or explanation. "
         "Respond with ONLY a valid JSON array, no explanation, no markdown formatting, no extra text.\n\n"
         f"TEXT:\n{ocr_text}"
     )
@@ -122,7 +112,7 @@ def extract_structured_data(ocr_text, document_type):
                 messages=[{"role": "user", "content": prompt}],
                 model="openai/gpt-oss-120b",
             )
-            raw_output = response.choices[0].message.content.strip()
+            raw_output = strip_thinking_blocks(response.choices[0].message.content)
 
             if raw_output.startswith("```"):
                 raw_output = raw_output.strip("`")

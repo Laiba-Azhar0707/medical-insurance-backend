@@ -3,6 +3,7 @@ import base64
 import time
 from dotenv import load_dotenv
 from groq import Groq
+from text_cleanup import strip_thinking_blocks
 
 load_dotenv()
 
@@ -51,7 +52,8 @@ def extract_text_from_image(image_path, document_type="general"):
             "Critical rule: only output institution names, addresses, and locations that are "
             "literally visible in the image. Never substitute a different but similar-sounding "
             "name, city, or address. If unsure, write [ILLEGIBLE] rather than guessing. "
-            "Do not summarize, explain, or describe the image, only output the transcribed content."
+            "Do not summarize, explain, or describe the image, only output the transcribed content. "
+            "Do not include any reasoning, thinking, or explanation, respond with ONLY the transcription."
         )
     else:
         prompt = (
@@ -60,7 +62,8 @@ def extract_text_from_image(image_path, document_type="general"):
             "Output only the raw transcribed text, nothing else. "
             "Critical rule: only output words that are actually visible in the image. "
             "Never add a sentence, phrase, or word that continues or completes an idea unless it is literally written there. "
-            "If a word is illegible, write [ILLEGIBLE] instead of guessing or inventing plausible text."
+            "If a word is illegible, write [ILLEGIBLE] instead of guessing or inventing plausible text. "
+            "Do not include any reasoning, thinking, or explanation, respond with ONLY the transcription."
         )
 
     last_error = None
@@ -81,7 +84,7 @@ def extract_text_from_image(image_path, document_type="general"):
                 ],
                 model="qwen/qwen3.6-27b",
             )
-            extracted_text = response.choices[0].message.content
+            extracted_text = strip_thinking_blocks(response.choices[0].message.content)
             identity_flag = flag_suspicious_identity_fields(extracted_text)
             return {"success": True, "text": extracted_text, "error": None, "identity_flag": identity_flag}
 
