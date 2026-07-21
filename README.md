@@ -3,7 +3,7 @@
 
 An end-to-end system that automates medical insurance claim review: it reads scanned prescriptions, medicine bills, lab bills, and consultation receipts, cross-checks billed items against what was actually prescribed, and flags discrepancies — automatically, in seconds, instead of a human reviewer doing it by hand.
 
-**Live demo:** [Frontend](https://medical-insurance-frontend-jxec5h7ou-laiba24.vercel.app) · [API docs](https://medical-insurance-backend-production.up.railway.app/docs)
+**Live demo:** [Frontend](https://medical-insurance-frontend.vercel.app) · [API docs](https://medical-insurance-backend-production.up.railway.app/docs)
 Test login: `user@test.com` / `password123`
 
 ![Claim results — automated dosage-mismatch and unprescribed-item detection](assets/demo-results.png)
