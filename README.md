@@ -1,3 +1,4 @@
+![Tests](https://github.com/Laiba-Azhar0707/medical-insurance-backend/actions/workflows/tests.yml/badge.svg)
 # AI-Powered Medical Insurance Claims Processing
 
 An end-to-end system that automates medical insurance claim review: it reads scanned prescriptions, medicine bills, lab bills, and consultation receipts, cross-checks billed items against what was actually prescribed, and flags discrepancies — automatically, in seconds, instead of a human reviewer doing it by hand.
