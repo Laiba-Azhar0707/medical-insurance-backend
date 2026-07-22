@@ -1,3 +1,4 @@
+from concurrent.futures import ThreadPoolExecutor
 import os
 from fastapi import FastAPI, Depends, HTTPException, Header, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
@@ -84,6 +85,61 @@ def dashboard(current_user: User = Depends(get_current_user)):
     }
 
 
+def process_document_type(doc_type, upload_list, claim_id, doc_config, upload_dir):
+    """Saves pages to disk and runs OCR + structured extraction for one document type.
+    Pure function — no DB access — so it's safe to run in a thread pool alongside
+    the other document types instead of one at a time."""
+    combined_text = ""
+    combined_identity_flag = False
+    page_errors = []
+    saved_pages = []  # file_paths for DB writes done later, in the main thread
+
+    for page_num, upload in enumerate(upload_list, start=1):
+        filename = f"claim_{claim_id}_{doc_type}_page{page_num}_{upload.filename}"
+        file_path = os.path.join(upload_dir, filename)
+
+        with open(file_path, "wb") as buffer:
+            shutil.copyfileobj(upload.file, buffer)
+
+        saved_pages.append(file_path)
+
+        type_check = validate_file_type(file_path)
+        if not type_check["valid"]:
+            page_errors.append(f"Page {page_num}: {type_check['reason']}")
+            continue
+
+        quality_check = check_image_quality(file_path)
+        if not quality_check["acceptable"]:
+            page_errors.append(f"Page {page_num}: {quality_check['reason']}")
+            continue
+
+        ocr_mode, extraction_type = doc_config[doc_type]
+        ocr_result = extract_text_from_image(file_path, document_type=ocr_mode)
+
+        if ocr_result["success"]:
+            combined_text += f"\n\n--- Page {page_num} ---\n\n" + ocr_result["text"]
+            combined_identity_flag = combined_identity_flag or ocr_result.get("identity_flag", False)
+        else:
+            page_errors.append(f"Page {page_num}: {ocr_result['error']}")
+
+    result = {
+        "doc_type": doc_type,
+        "saved_pages": saved_pages,
+        "page_errors": page_errors,
+        "combined_identity_flag": combined_identity_flag,
+        "upload_count": len(upload_list),
+    }
+
+    if not combined_text.strip():
+        result["error"] = "; ".join(page_errors) if page_errors else "No usable pages"
+        return result
+
+    _, extraction_type = doc_config[doc_type]
+    structured = extract_structured_data(combined_text, extraction_type)
+    result["structured"] = structured
+    return result
+
+
 @app.post("/claims")
 def create_claim(
     claim_type: str = Form(...),
@@ -118,22 +174,32 @@ def create_claim(
         "consultation_receipt": ("general", "consultation_receipt"),
     }
 
+    # Run OCR + extraction for all 4 document types concurrently instead of
+    # one after another — this is what previously made claim submission take
+    # over a minute. Each call to Groq is I/O-bound, so a thread pool here
+    # gives a real speedup with no correctness risk (no DB access happens
+    # inside process_document_type).
     extraction_summary = []
     items_by_doc_type = {}
 
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        futures = {
+            executor.submit(process_document_type, doc_type, upload_list, new_claim.id, doc_config, UPLOAD_DIR): doc_type
+            for doc_type, upload_list in files.items()
+        }
+        results_by_doc_type = {futures[future]: future.result() for future in futures}
+
+    # DB writes happen sequentially here, after all the slow network calls
+    # are already done — SQLAlchemy sessions aren't thread-safe, so this
+    # part can't be parallelized, but it's fast compared to the Groq calls.
     for doc_type, upload_list in files.items():
-        combined_text = ""
-        combined_identity_flag = False
-        page_errors = []
+        result = results_by_doc_type[doc_type]
+        page_errors = result["page_errors"]
+        saved_pages = result["saved_pages"]
+        combined_identity_flag = result["combined_identity_flag"]
+
         first_document_id = None
-
-        for page_num, upload in enumerate(upload_list, start=1):
-            filename = f"claim_{new_claim.id}_{doc_type}_page{page_num}_{upload.filename}"
-            file_path = os.path.join(UPLOAD_DIR, filename)
-
-            with open(file_path, "wb") as buffer:
-                shutil.copyfileobj(upload.file, buffer)
-
+        for file_path in saved_pages:
             new_document = Document(
                 claim_id=new_claim.id,
                 doc_type=doc_type,
@@ -143,40 +209,19 @@ def create_claim(
             db.add(new_document)
             db.commit()
             db.refresh(new_document)
-
             if first_document_id is None:
                 first_document_id = new_document.id
 
-            type_check = validate_file_type(file_path)
-            if not type_check["valid"]:
-                page_errors.append(f"Page {page_num}: {type_check['reason']}")
-                continue
-
-            quality_check = check_image_quality(file_path)
-            if not quality_check["acceptable"]:
-                page_errors.append(f"Page {page_num}: {quality_check['reason']}")
-                continue
-
-            ocr_mode, extraction_type = doc_config[doc_type]
-            ocr_result = extract_text_from_image(file_path, document_type=ocr_mode)
-
-            if ocr_result["success"]:
-                combined_text += f"\n\n--- Page {page_num} ---\n\n" + ocr_result["text"]
-                combined_identity_flag = combined_identity_flag or ocr_result.get("identity_flag", False)
-            else:
-                page_errors.append(f"Page {page_num}: {ocr_result['error']}")
-
         items_by_doc_type[doc_type] = []
 
-        if not combined_text.strip():
+        if "structured" not in result:
             extraction_summary.append({
                 "doc_type": doc_type,
-                "error": "; ".join(page_errors) if page_errors else "No usable pages",
+                "error": result.get("error", "No usable pages"),
             })
             continue
 
-        _, extraction_type = doc_config[doc_type]
-        structured = extract_structured_data(combined_text, extraction_type)
+        structured = result["structured"]
 
         if structured["success"]:
             for item in structured["items"]:
@@ -195,7 +240,7 @@ def create_claim(
 
             extraction_summary.append({
                 "doc_type": doc_type,
-                "pages_processed": len(upload_list) - len(page_errors),
+                "pages_processed": result["upload_count"] - len(page_errors),
                 "page_errors": page_errors,
                 "items_found": len(structured["items"]),
                 "needs_review": structured["needs_review"] or combined_identity_flag,
