@@ -13,7 +13,7 @@ class User(Base):
     role = Column(String, default="user")
     created_at = Column(DateTime, default=datetime.utcnow)
 
-    claims = relationship("Claim", back_populates="user")
+    claims = relationship("Claim", back_populates="user", foreign_keys="Claim.user_id")
 
 
 class Claim(Base):
@@ -22,11 +22,15 @@ class Claim(Base):
     id = Column(Integer, primary_key=True, index=True)
     user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
     claim_type = Column(String, nullable=False)   # "pre_paid" or "reimbursement"
-    status = Column(String, default="In Progress")
+    status = Column(String, default="In Progress")   # AI pipeline result: In Progress / Processed / Needs Manual Review
+    admin_status = Column(String, default="Pending Review")   # admin decision: Pending Review / Approved / Rejected
+    reviewed_by = Column(Integer, ForeignKey("users.id"), nullable=True)
+    reviewed_at = Column(DateTime, nullable=True)
     approved_amount = Column(Float, nullable=True)
     submitted_at = Column(DateTime, default=datetime.utcnow)
 
-    user = relationship("User", back_populates="claims")
+    user = relationship("User", back_populates="claims", foreign_keys=[user_id])
+    reviewer = relationship("User", foreign_keys=[reviewed_by])
     documents = relationship("Document", back_populates="claim")
     deductions = relationship("Deduction", back_populates="claim")
 

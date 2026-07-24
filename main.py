@@ -13,7 +13,7 @@ load_dotenv()
 
 from database import get_db
 from models import User, Claim, Document, ExtractedData, Deduction
-from auth import verify_password, create_access_token, decode_access_token
+from auth import verify_password, create_access_token, decode_access_token, hash_password
 from ocr import extract_text_from_image
 from extraction import extract_structured_data
 from image_quality import check_image_quality, validate_file_type
@@ -77,6 +77,12 @@ def get_current_user(authorization: str = Header(...), db: Session = Depends(get
         raise HTTPException(status_code=401, detail="User not found")
 
     return user
+
+
+def require_admin(current_user: User = Depends(get_current_user)):
+    if current_user.role != "admin":
+        raise HTTPException(status_code=403, detail="Admin access required")
+    return current_user
 
 
 @app.get("/dashboard")
@@ -362,4 +368,114 @@ def create_claim(
         "message": "Claim submitted successfully",
         "extraction_summary": extraction_summary,
         "deduction_summary": deduction_summary,
+    }
+
+
+def serialize_claim_summary(claim, include_user=False):
+    summary = {
+        "claim_id": claim.id,
+        "claim_type": claim.claim_type,
+        "status": claim.status,
+        "admin_status": claim.admin_status,
+        "approved_amount": claim.approved_amount,
+        "submitted_at": claim.submitted_at.isoformat() if claim.submitted_at else None,
+        "reviewed_at": claim.reviewed_at.isoformat() if claim.reviewed_at else None,
+    }
+    if include_user:
+        summary["user_id"] = claim.user_id
+        summary["user_name"] = claim.user.name
+        summary["user_email"] = claim.user.email
+    return summary
+
+
+@app.get("/claims/history")
+def get_my_claims(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    claims = (
+        db.query(Claim)
+        .filter(Claim.user_id == current_user.id)
+        .order_by(Claim.submitted_at.desc())
+        .all()
+    )
+    return {"claims": [serialize_claim_summary(c) for c in claims]}
+
+
+@app.get("/admin/claims")
+def get_all_claims(admin: User = Depends(require_admin), db: Session = Depends(get_db)):
+    claims = db.query(Claim).order_by(Claim.submitted_at.desc()).all()
+    return {"claims": [serialize_claim_summary(c, include_user=True) for c in claims]}
+
+
+class ClaimReviewRequest(BaseModel):
+    decision: str  # "approved" or "rejected"
+
+
+@app.post("/admin/claims/{claim_id}/review")
+def review_claim(
+    claim_id: int,
+    payload: ClaimReviewRequest,
+    admin: User = Depends(require_admin),
+    db: Session = Depends(get_db),
+):
+    if payload.decision not in ("approved", "rejected"):
+        raise HTTPException(status_code=400, detail="Decision must be 'approved' or 'rejected'")
+
+    claim = db.query(Claim).filter(Claim.id == claim_id).first()
+    if claim is None:
+        raise HTTPException(status_code=404, detail="Claim not found")
+
+    claim.admin_status = "Approved" if payload.decision == "approved" else "Rejected"
+    claim.reviewed_by = admin.id
+    claim.reviewed_at = datetime.utcnow()
+    db.commit()
+    db.refresh(claim)
+
+    return serialize_claim_summary(claim, include_user=True)
+
+
+class CreateUserRequest(BaseModel):
+    name: str
+    email: str
+    password: str
+    role: str = "user"  # "user" or "admin"
+
+
+@app.post("/admin/users")
+def create_user(
+    payload: CreateUserRequest,
+    admin: User = Depends(require_admin),
+    db: Session = Depends(get_db),
+):
+    if payload.role not in ("user", "admin"):
+        raise HTTPException(status_code=400, detail="Role must be 'user' or 'admin'")
+
+    existing = db.query(User).filter(User.email == payload.email).first()
+    if existing:
+        raise HTTPException(status_code=400, detail="A user with this email already exists")
+
+    new_user = User(
+        name=payload.name,
+        email=payload.email,
+        password_hash=hash_password(payload.password),
+        role=payload.role,
+    )
+    db.add(new_user)
+    db.commit()
+    db.refresh(new_user)
+
+    return {
+        "id": new_user.id,
+        "name": new_user.name,
+        "email": new_user.email,
+        "role": new_user.role,
+    }
+
+
+@app.get("/admin/users")
+def list_users(admin: User = Depends(require_admin), db: Session = Depends(get_db)):
+    users = db.query(User).order_by(User.created_at.desc()).all()
+    return {
+        "users": [
+            {"id": u.id, "name": u.name, "email": u.email, "role": u.role, "created_at": u.created_at.isoformat()}
+            for u in users
+        ]
     }
