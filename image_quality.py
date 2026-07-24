@@ -2,7 +2,7 @@ import os
 import cv2
 import numpy as np
 
-ALLOWED_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp"}
+ALLOWED_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".pdf"}
 
 
 def validate_file_type(file_path):

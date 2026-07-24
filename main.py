@@ -18,6 +18,7 @@ from extraction import extract_structured_data
 from image_quality import check_image_quality, validate_file_type
 from comparison import compare_prescribed_vs_billed
 from deduction import calculate_deductions
+from pdf_utils import is_pdf, convert_pdf_to_images
 
 app = FastAPI()
 
@@ -88,14 +89,18 @@ def dashboard(current_user: User = Depends(get_current_user)):
 def process_document_type(doc_type, upload_list, claim_id, doc_config, upload_dir):
     """Saves pages to disk and runs OCR + structured extraction for one document type.
     Pure function — no DB access — so it's safe to run in a thread pool alongside
-    the other document types instead of one at a time."""
+    the other document types instead of one at a time.
+    PDFs are converted to one image per page before OCR; each PDF still counts
+    as a single uploaded file for DB/Document purposes, but every rendered page
+    goes through OCR individually, same as a multi-page image upload would."""
     combined_text = ""
     combined_identity_flag = False
     page_errors = []
-    saved_pages = []  # file_paths for DB writes done later, in the main thread
+    saved_pages = []  # original uploaded file_paths, for DB writes done later
+    ocr_page_counter = 0
 
-    for page_num, upload in enumerate(upload_list, start=1):
-        filename = f"claim_{claim_id}_{doc_type}_page{page_num}_{upload.filename}"
+    for upload in upload_list:
+        filename = f"claim_{claim_id}_{doc_type}_{upload.filename}"
         file_path = os.path.join(upload_dir, filename)
 
         with open(file_path, "wb") as buffer:
@@ -105,29 +110,43 @@ def process_document_type(doc_type, upload_list, claim_id, doc_config, upload_di
 
         type_check = validate_file_type(file_path)
         if not type_check["valid"]:
-            page_errors.append(f"Page {page_num}: {type_check['reason']}")
+            page_errors.append(f"{upload.filename}: {type_check['reason']}")
             continue
 
-        quality_check = check_image_quality(file_path)
-        if not quality_check["acceptable"]:
-            page_errors.append(f"Page {page_num}: {quality_check['reason']}")
-            continue
-
-        ocr_mode, extraction_type = doc_config[doc_type]
-        ocr_result = extract_text_from_image(file_path, document_type=ocr_mode)
-
-        if ocr_result["success"]:
-            combined_text += f"\n\n--- Page {page_num} ---\n\n" + ocr_result["text"]
-            combined_identity_flag = combined_identity_flag or ocr_result.get("identity_flag", False)
+        # PDFs get expanded into one image per page; regular images are
+        # treated as a single "page" so the rest of the pipeline is identical.
+        if is_pdf(file_path):
+            try:
+                image_paths = convert_pdf_to_images(file_path, upload_dir)
+            except Exception as e:
+                page_errors.append(f"{upload.filename}: Could not read PDF ({str(e)})")
+                continue
         else:
-            page_errors.append(f"Page {page_num}: {ocr_result['error']}")
+            image_paths = [file_path]
+
+        for image_path in image_paths:
+            ocr_page_counter += 1
+
+            quality_check = check_image_quality(image_path)
+            if not quality_check["acceptable"]:
+                page_errors.append(f"Page {ocr_page_counter}: {quality_check['reason']}")
+                continue
+
+            ocr_mode, extraction_type = doc_config[doc_type]
+            ocr_result = extract_text_from_image(image_path, document_type=ocr_mode)
+
+            if ocr_result["success"]:
+                combined_text += f"\n\n--- Page {ocr_page_counter} ---\n\n" + ocr_result["text"]
+                combined_identity_flag = combined_identity_flag or ocr_result.get("identity_flag", False)
+            else:
+                page_errors.append(f"Page {ocr_page_counter}: {ocr_result['error']}")
 
     result = {
         "doc_type": doc_type,
         "saved_pages": saved_pages,
         "page_errors": page_errors,
         "combined_identity_flag": combined_identity_flag,
-        "upload_count": len(upload_list),
+        "upload_count": ocr_page_counter,
     }
 
     if not combined_text.strip():
