@@ -1,5 +1,6 @@
 from concurrent.futures import ThreadPoolExecutor
 import os
+from typing import Optional
 from fastapi import FastAPI, Depends, HTTPException, Header, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
@@ -159,16 +160,36 @@ def process_document_type(doc_type, upload_list, claim_id, doc_config, upload_di
     return result
 
 
+BILL_DOC_TYPES = {"medicine_bill", "lab_bill", "consultation_receipt"}
+
+
 @app.post("/claims")
 def create_claim(
     claim_type: str = Form(...),
-    prescription: list[UploadFile] = File(...),
-    medicine_bill: list[UploadFile] = File(...),
-    lab_bill: list[UploadFile] = File(...),
-    consultation_receipt: list[UploadFile] = File(...),
+    prescription: list[UploadFile] = File(default=[]),
+    medicine_bill: list[UploadFile] = File(default=[]),
+    lab_bill: list[UploadFile] = File(default=[]),
+    consultation_receipt: list[UploadFile] = File(default=[]),
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
+    files = {
+        "prescription": prescription,
+        "medicine_bill": medicine_bill,
+        "lab_bill": lab_bill,
+        "consultation_receipt": consultation_receipt,
+    }
+
+    # Prescription is optional (unprescribed items just get flagged instead
+    # of blocking submission), but at least one bill type is required —
+    # a claim with nothing billed has nothing to process.
+    submitted_bill_types = [dt for dt in BILL_DOC_TYPES if files[dt]]
+    if not submitted_bill_types:
+        raise HTTPException(
+            status_code=400,
+            detail="Please upload at least one bill (medicine bill, lab bill, or consultation receipt).",
+        )
+
     new_claim = Claim(
         user_id=current_user.id,
         claim_type=claim_type,
@@ -179,13 +200,6 @@ def create_claim(
     db.commit()
     db.refresh(new_claim)
 
-    files = {
-        "prescription": prescription,
-        "medicine_bill": medicine_bill,
-        "lab_bill": lab_bill,
-        "consultation_receipt": consultation_receipt,
-    }
-
     doc_config = {
         "prescription": ("general", "prescription"),
         "medicine_bill": ("general", "medicine_bill"),
@@ -193,25 +207,25 @@ def create_claim(
         "consultation_receipt": ("general", "consultation_receipt"),
     }
 
-    # Run OCR + extraction for all 4 document types concurrently instead of
-    # one after another — this is what previously made claim submission take
-    # over a minute. Each call to Groq is I/O-bound, so a thread pool here
-    # gives a real speedup with no correctness risk (no DB access happens
-    # inside process_document_type).
+    # Only process document types the user actually submitted — no point
+    # spending a Groq call or generating a spurious "no pages" error for
+    # something they deliberately left out.
+    submitted_doc_types = {dt: files[dt] for dt in files if files[dt]}
+
     extraction_summary = []
     items_by_doc_type = {}
 
-    with ThreadPoolExecutor(max_workers=4) as executor:
+    with ThreadPoolExecutor(max_workers=max(1, len(submitted_doc_types))) as executor:
         futures = {
             executor.submit(process_document_type, doc_type, upload_list, new_claim.id, doc_config, UPLOAD_DIR): doc_type
-            for doc_type, upload_list in files.items()
+            for doc_type, upload_list in submitted_doc_types.items()
         }
         results_by_doc_type = {futures[future]: future.result() for future in futures}
 
     # DB writes happen sequentially here, after all the slow network calls
     # are already done — SQLAlchemy sessions aren't thread-safe, so this
     # part can't be parallelized, but it's fast compared to the Groq calls.
-    for doc_type, upload_list in files.items():
+    for doc_type, upload_list in submitted_doc_types.items():
         result = results_by_doc_type[doc_type]
         page_errors = result["page_errors"]
         saved_pages = result["saved_pages"]
