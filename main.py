@@ -52,6 +52,9 @@ def login(payload: LoginRequest, db: Session = Depends(get_db)):
     if not user or not verify_password(payload.password, user.password_hash):
         raise HTTPException(status_code=401, detail="Invalid email or password")
 
+    if not user.is_active:
+        raise HTTPException(status_code=403, detail="This account has been deactivated. Contact an administrator.")
+
     token = create_access_token({"sub": user.email, "role": user.role})
 
     return {
@@ -467,6 +470,7 @@ def create_user(
         "name": new_user.name,
         "email": new_user.email,
         "role": new_user.role,
+        "is_active": new_user.is_active,
     }
 
 
@@ -475,7 +479,59 @@ def list_users(admin: User = Depends(require_admin), db: Session = Depends(get_d
     users = db.query(User).order_by(User.created_at.desc()).all()
     return {
         "users": [
-            {"id": u.id, "name": u.name, "email": u.email, "role": u.role, "created_at": u.created_at.isoformat()}
+            {"id": u.id, "name": u.name, "email": u.email, "role": u.role, "is_active": u.is_active, "created_at": u.created_at.isoformat()}
             for u in users
         ]
     }
+
+
+@app.patch("/admin/users/{user_id}/toggle-active")
+def toggle_user_active(
+    user_id: int,
+    admin: User = Depends(require_admin),
+    db: Session = Depends(get_db),
+):
+    target_user = db.query(User).filter(User.id == user_id).first()
+    if target_user is None:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    if target_user.id == admin.id:
+        raise HTTPException(status_code=400, detail="You can't deactivate your own account")
+
+    target_user.is_active = not target_user.is_active
+    db.commit()
+    db.refresh(target_user)
+
+    return {
+        "id": target_user.id,
+        "name": target_user.name,
+        "email": target_user.email,
+        "role": target_user.role,
+        "is_active": target_user.is_active,
+    }
+
+
+@app.delete("/admin/users/{user_id}")
+def delete_user(
+    user_id: int,
+    admin: User = Depends(require_admin),
+    db: Session = Depends(get_db),
+):
+    target_user = db.query(User).filter(User.id == user_id).first()
+    if target_user is None:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    if target_user.id == admin.id:
+        raise HTTPException(status_code=400, detail="You can't delete your own account")
+
+    existing_claims = db.query(Claim).filter(Claim.user_id == target_user.id).count()
+    if existing_claims > 0:
+        raise HTTPException(
+            status_code=400,
+            detail=f"This user has {existing_claims} claim(s) on record and can't be deleted. Deactivate the account instead to preserve claim history.",
+        )
+
+    db.delete(target_user)
+    db.commit()
+
+    return {"message": f"{target_user.name} was deleted"}
